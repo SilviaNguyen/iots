@@ -1,0 +1,235 @@
+// Traffic Light Control for Arduino - IMPROVED VERSION
+#define XANH_1    8   // P1.0 -> Digital Pin 8
+#define VANG_1    9   // P1.1 -> Digital Pin 9  
+#define DO_1      10  // P1.2 -> Digital Pin 10
+#define XANH_2    11  // P1.3 -> Digital Pin 11
+#define VANG_2    12  // P1.4 -> Digital Pin 12
+#define DO_2      13  // P1.5 -> Digital Pin 13
+#define BUTTON_PIN 2  // Interrupt pin for swap button
+
+int time_xanh1 = 25;  // Thời gian đèn xanh hướng 1
+int time_xanh2 = 33;  // Thời gian đèn xanh hướng 2
+int time_vang = 3;    // Thời gian đèn vàng
+
+int current_state = 0;  // 0: H1 xanh, 1: H1 vàng, 2: H2 xanh, 3: H2 vàng
+int time_counter = 0;
+bool system_running = false;
+unsigned long previousMillis = 0;
+const long interval = 1000; // 1 second
+
+// Button handling variables
+volatile bool button_pressed = false;
+unsigned long last_interrupt_time = 0;
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Initialize LED pins
+  pinMode(XANH_1, OUTPUT);
+  pinMode(VANG_1, OUTPUT);
+  pinMode(DO_1, OUTPUT);
+  pinMode(XANH_2, OUTPUT);
+  pinMode(VANG_2, OUTPUT);
+  pinMode(DO_2, OUTPUT);
+  
+  // Initialize button with interrupt
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
+  
+  turnOffAllLights();
+  
+  Serial.println("ARDUINO_READY");
+  Serial.println("Commands: A=Auto, S=Swap, STOP=Stop, T,x1,x2,v=SetTime");
+}
+
+void loop() {
+  handleSerialCommand();
+  handleButtonPress();
+  
+  if (system_running) {
+    runTrafficLightCycle();
+  }
+  
+  sendStatusToPC();
+}
+
+// Interrupt Service Routine for button
+void buttonISR() {
+  unsigned long interrupt_time = millis();
+  // Debounce: ignore if interrupt comes too quickly
+  if (interrupt_time - last_interrupt_time > 200) {
+    button_pressed = true;
+    last_interrupt_time = interrupt_time;
+  }
+}
+
+void handleButtonPress() {
+  if (button_pressed) {
+    button_pressed = false;
+    swapGreenTime();
+    Serial.println("BUTTON_SWAP_EXECUTED");
+  }
+}
+
+void handleSerialCommand() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command == "A") {
+      // Start automatic mode
+      system_running = true;
+      current_state = 0;
+      time_counter = 0;
+      previousMillis = millis();
+      Serial.println("AUTO_MODE_STARTED");
+    }
+    else if (command == "STOP") {
+      // Stop system
+      system_running = false;
+      turnOffAllLights();
+      Serial.println("SYSTEM_STOPPED");
+    }
+    else if (command == "S") {
+      // Swap green time
+      swapGreenTime();
+      Serial.println("TIME_SWAPPED_BY_PC");
+    }
+    else if (command.startsWith("T,")) {
+      // Set time: T,xanh1,xanh2,vang
+      parseAndSetTime(command);
+    }
+    else if (command == "1") {
+      // Manual control - Direction 1 green
+      system_running = false;
+      setLights(HIGH, LOW, LOW, LOW, LOW, HIGH);
+      Serial.println("MANUAL_DIR1_GREEN");
+    }
+    else if (command == "2") {
+      // Manual control - Direction 2 green
+      system_running = false;
+      setLights(LOW, LOW, HIGH, HIGH, LOW, LOW);
+      Serial.println("MANUAL_DIR2_GREEN");
+    }
+  }
+}
+
+void parseAndSetTime(String data) {
+  // Format: T,xanh1,xanh2,vang
+  int firstComma = data.indexOf(',');
+  int secondComma = data.indexOf(',', firstComma + 1);
+  int thirdComma = data.indexOf(',', secondComma + 1);
+  
+  if (firstComma > 0 && secondComma > 0 && thirdComma > 0) {
+    int new_xanh1 = data.substring(firstComma + 1, secondComma).toInt();
+    int new_xanh2 = data.substring(secondComma + 1, thirdComma).toInt();
+    int new_vang = data.substring(thirdComma + 1).toInt();
+    
+    // Validate times (1-99 seconds)
+    if (new_xanh1 >= 1 && new_xanh1 <= 99 &&
+        new_xanh2 >= 1 && new_xanh2 <= 99 &&
+        new_vang >= 1 && new_vang <= 10) {
+      
+      time_xanh1 = new_xanh1;
+      time_xanh2 = new_xanh2;
+      time_vang = new_vang;
+      
+      Serial.println("TIME_SET_SUCCESS");
+    } else {
+      Serial.println("TIME_SET_ERROR_INVALID_VALUES");
+    }
+  } else {
+    Serial.println("TIME_SET_ERROR_FORMAT");
+  }
+}
+
+void swapGreenTime() {
+  int temp = time_xanh1;
+  time_xanh1 = time_xanh2;
+  time_xanh2 = temp;
+  
+  Serial.print("GREEN_TIME_SWAPPED: X1=");
+  Serial.print(time_xanh1);
+  Serial.print("s X2=");
+  Serial.print(time_xanh2);
+  Serial.println("s");
+}
+
+void runTrafficLightCycle() {
+  unsigned long currentMillis = millis();
+  
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+    time_counter++;
+    
+    switch (current_state) {
+      case 0: // Hướng 1 xanh, Hướng 2 đỏ
+        setLights(HIGH, LOW, LOW, LOW, LOW, HIGH);
+        if (time_counter >= time_xanh1) {
+          current_state = 1;
+          time_counter = 0;
+        }
+        break;
+        
+      case 1: // Hướng 1 vàng, Hướng 2 đỏ
+        setLights(LOW, HIGH, LOW, LOW, LOW, HIGH);
+        if (time_counter >= time_vang) {
+          current_state = 2;
+          time_counter = 0;
+        }
+        break;
+        
+      case 2: // Hướng 1 đỏ, Hướng 2 xanh
+        setLights(LOW, LOW, HIGH, HIGH, LOW, LOW);
+        if (time_counter >= time_xanh2) {
+          current_state = 3;
+          time_counter = 0;
+        }
+        break;
+        
+      case 3: // Hướng 1 đỏ, Hướng 2 vàng
+        setLights(LOW, LOW, HIGH, LOW, HIGH, LOW);
+        if (time_counter >= time_vang) {
+          current_state = 0;
+          time_counter = 0;
+        }
+        break;
+    }
+  }
+}
+
+void setLights(int x1, int v1, int d1, int x2, int v2, int d2) {
+  digitalWrite(XANH_1, x1);
+  digitalWrite(VANG_1, v1);
+  digitalWrite(DO_1, d1);
+  digitalWrite(XANH_2, x2);
+  digitalWrite(VANG_2, v2);
+  digitalWrite(DO_2, d2);
+}
+
+void turnOffAllLights() {
+  setLights(LOW, LOW, LOW, LOW, LOW, LOW);
+}
+
+void sendStatusToPC() {
+  static unsigned long lastStatusSend = 0;
+  unsigned long currentTime = millis();
+  
+  // Send status every second
+  if (currentTime - lastStatusSend >= 1000) {
+    lastStatusSend = currentTime;
+    
+    Serial.print("STATUS,");
+    Serial.print(current_state);
+    Serial.print(",");
+    Serial.print(time_counter);
+    Serial.print(",");
+    Serial.print(time_xanh1);
+    Serial.print(",");
+    Serial.print(time_xanh2);
+    Serial.print(",");
+    Serial.print(time_vang);
+    Serial.print(",");
+    Serial.println(system_running ? "1" : "0");
+  }
+}
